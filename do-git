@@ -1,0 +1,75 @@
+#!/bin/bash
+
+# `do-git` will concurrently run a git command in multiple directories for you.
+
+# `do-git pull` will run `git pull` inside all git directories in your current
+# directory.  This is a simpler, cooler version of "gitup" IMO :)
+#
+# The best way to do this is to run `git branch -u origin/develop` in all your
+# repos -- assuming that you want git pull to update your current branch with
+# develop. Then you just run `do-git pull` and you're done with all updates!  Or
+# run `git branch -u origin/another-branch` if you want that repo to pull from
+# something else.
+
+# `find . -name .git | xargs dirname | do-git diff` will run `git diff` in every
+# git project under your cwd.
+
+# `do-git pull || cat ./repos_with_errors | do-git status` will take all the repos
+# that failed to git pull, and then run git status on them. Note that if any
+# occurrance of git fails, then do-git fails
+
+# If there's a hardcoded list of repos you always want to use, then create a
+# file called 'repos', and (unless you pipe something via stdin), do-git will
+# use that list by default
+
+
+
+error_file=./repos_with_errors
+rm -rf $error_file 2> /dev/null
+tmpdir=/tmp/do-git_$RANDOM
+rm -rf $tmpdir 2> /dev/null
+mkdir -p $tmpdir || (echo "ERROR: could not create tmp directory"; kill 0)
+unset PIDS
+
+echo "running \`git $@\` across all folders concurrently. Please wait..."
+
+### First, spawn the git commands across all requred paths
+while read path; do
+    echo '##########' $path > $tmpdir/do-git_$(basename $path)
+    (git --no-pager -C $path $@ >> $tmpdir/do-git_$(basename $path) 2>&1 || echo $path >> $error_file ) &
+    PIDS+=($!)
+done < <(
+    ## Here is where we collect the paths to apply git across.
+    if [ -p /dev/stdin ]; then
+        cat /dev/stdin
+    elif [ -e ./repos ]; then
+        cat ./repos
+    else
+        find . -name .git -maxdepth 2 | xargs dirname
+    fi)
+# NOTE: the reason I put the while loop first above, and then pipe in command
+# afterwards, is to make sure that the while loop is not a subshell. If it's a
+# subshell, then PIDS is no longer a global variable readable later. See
+# http://stackoverflow.com/a/16855194/10608
+
+### Now we wait for all git processes to finish
+while [ ${#PIDS[@]} != 0 ]; do
+    for i in ${!PIDS[@]}; do
+        pid=${PIDS[$i]}
+        if ! ps -p $pid >/dev/null; then
+            unset PIDS[$i]
+        fi
+    done
+done
+
+cat $tmpdir/do-git_*
+
+if [ -e $error_file ]; then
+    echo
+    echo Some repos failed. Those repos are stored in $error_file
+    echo "To rerun this do-git command on the failed repo paths, run \`cat $error_file | do-git $@\`"
+    exit 1
+else
+    exit 0
+fi
+
